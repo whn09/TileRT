@@ -5,9 +5,12 @@ from typing import Tuple, Optional
 
 tilelang.set_log_level("WARNING")
 
+# NOTE: adapted for tilelang 0.1.8 (CUDA13 image). The example targeted 0.1.6
+# where the key was TL_DISABLE_FAST_MATH; 0.1.8 renamed it to TL_ENABLE_FAST_MATH
+# (semantics flipped: disable=True  ->  enable=False).
 pass_configs = {
     tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    tilelang.PassConfigKey.TL_DISABLE_FAST_MATH: True}
+    tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False}
 
 FP8 = T.float8_e4m3fn
 BF16 = T.bfloat16

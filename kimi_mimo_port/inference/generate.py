@@ -78,6 +78,26 @@ def generate(model: Transformer,
     return completion_tokens
 
 
+def _to_ids(out):
+    """Normalize apply_chat_template output to a plain list[int].
+
+    Different tokenizers (e.g. Kimi's TikToken backend) return a BatchEncoding/
+    dict or tensor when tokenize=True, rather than a flat list. Unwrap to ints.
+    """
+    # transformers BatchEncoding / dict
+    if hasattr(out, "input_ids"):
+        out = out.input_ids
+    elif isinstance(out, dict):
+        out = out["input_ids"]
+    # torch tensor / numpy
+    if hasattr(out, "tolist"):
+        out = out.tolist()
+    # unwrap a leading batch dim: [[...]] -> [...]
+    if len(out) > 0 and isinstance(out[0], list):
+        out = out[0]
+    return [int(x) for x in out]
+
+
 def main(
     ckpt_path: str,
     config: str,
@@ -114,7 +134,7 @@ def main(
     print(args)
     with torch.device("cuda"):
         model = Transformer(args)
-    tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
+    tokenizer = AutoTokenizer.from_pretrained(ckpt_path, trust_remote_code=True)
     print("load model")
     load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
     print("I'm DeepSeek 👋")
@@ -138,7 +158,7 @@ def main(
                 messages.clear()
                 continue
             messages.append({"role": "user", "content": prompt})
-            prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+            prompt_tokens = _to_ids(tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True))
             completion_tokens = generate(model, [prompt_tokens], max_new_tokens,
                                          tokenizer.eos_token_id, temperature)
             completion = tokenizer.decode(completion_tokens[0], skip_special_tokens=True)
@@ -151,11 +171,11 @@ def main(
             prompts
         ) <= args.max_batch_size, f"Number of prompts exceeds maximum batch size ({args.max_batch_size})"
         prompt_tokens = [
-            tokenizer.apply_chat_template([{
+            _to_ids(tokenizer.apply_chat_template([{
                 "role": "user",
                 "content": prompt
             }],
-                                          add_generation_prompt=True) for prompt in prompts
+                                          add_generation_prompt=True, tokenize=True)) for prompt in prompts
         ]
         completion_tokens = generate(model, prompt_tokens, max_new_tokens, tokenizer.eos_token_id,
                                      temperature)
