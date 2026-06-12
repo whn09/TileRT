@@ -9,6 +9,7 @@ import tilert
 if TYPE_CHECKING:
     from tilert.models.deepseek_v3_2.generator import DSAv32Generator
     from tilert.models.glm_5.generator import GLM5Generator
+    from tilert.models.mimo_v2.generator import MiMoV2Generator
 from tilert.benchmark import BenchMode
 from tilert.benchmark import coding_prompt as coding_bench
 from tilert.benchmark import long_prompt as long_bench
@@ -27,11 +28,15 @@ def get_generator(
     top_k: int = 256,
     enable_thinking: bool = False,
     sampling_seed: int = 42,
-) -> "DSAv32Generator | GLM5Generator":
+) -> "DSAv32Generator | GLM5Generator | MiMoV2Generator":
     """Load the matching backend .so and build the generator for ``model_type``.
 
     DeepSeek-V3.2 and GLM-5 ship as separate libraries; only one backend loads
     per process. Generators are imported lazily after the backend is loaded.
+
+    ``mimo_v2`` and ``kimi_k2`` are skeleton backends: their .so files are not
+    yet open-sourced, so load_backend()/the decode layer will raise a clear
+    error. The wiring is here so they are reachable the moment the .so lands.
     """
     tilert.load_backend(model_type)
 
@@ -69,6 +74,39 @@ def get_generator(
             sampling_seed=sampling_seed,
         )
 
+    if model_type == "mimo_v2":
+        from tilert.models.mimo_v2.generator import MiMoV2Generator
+        from tilert.models.mimo_v2.model_args import ModelArgsMiMoV2
+
+        return MiMoV2Generator(
+            model_args=ModelArgsMiMoV2(),
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            model_weights_dir=model_weights_dir,
+            with_mtp=with_mtp,
+            top_p=top_p,
+            top_k=top_k,
+            use_topp=top_p < 1.0,
+            enable_thinking=enable_thinking,
+            sampling_seed=sampling_seed,
+        )
+
+    if model_type == "kimi_k2":
+        from tilert.models.kimi_k2.generator import build_kimi_generator
+        from tilert.models.kimi_k2.model_args import ModelArgsKimiK2
+
+        return build_kimi_generator(
+            ModelArgsKimiK2(),
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            model_weights_dir=model_weights_dir,
+            with_mtp=with_mtp,
+            top_p=top_p,
+            top_k=top_k,
+            enable_thinking=enable_thinking,
+            sampling_seed=sampling_seed,
+        )
+
     raise ValueError(f"unsupported model_type: {model_type!r}")
 
 
@@ -84,8 +122,9 @@ def parse_args():  # type: ignore
         "--model",
         type=str,
         default="deepseek_v3_2",
-        choices=["deepseek_v3_2", "glm5"],
-        help="Model type to use (default: deepseek_v3_2).",
+        choices=["deepseek_v3_2", "glm5", "mimo_v2", "kimi_k2"],
+        help="Model type to use (default: deepseek_v3_2). "
+        "mimo_v2/kimi_k2 are skeleton backends pending their .so libraries.",
     )
     parser.add_argument("--max-new-tokens", type=int, default=4000, help="Max tokens to generate")
     parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")

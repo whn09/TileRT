@@ -662,13 +662,42 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     model_type = args.model_type
-    model_args: ModelArgsDsav32 | ModelArgsGLM5
     if model_type == "deepseek-v32":
         model_args = ModelArgsDsav32()
     elif model_type == "glm-5":
         model_args = ModelArgsGLM5()
+    elif model_type == "kimi-k2.6":
+        # Kimi-K2.6 is MLA (DeepSeek family). Its weights use the same MLA tensor
+        # layout, so the existing converter applies; only the hyperparameters and
+        # MoE expert quantization (INT4/NVFP4 vs FP8) differ. Validate the
+        # produced shards on-device before trusting them.
+        from tilert.models.kimi_k2.model_args import ModelArgsKimiK2
+
+        model_args = ModelArgsKimiK2()  # type: ignore[assignment]
+        logger.warning(
+            "Kimi-K2.6 conversion reuses the DeepSeek MLA path. Confirm the MoE "
+            "expert quant format (checkpoint is INT4/compressed-tensors) matches "
+            "what the target backend expects before running on hardware."
+        )
+    elif model_type == "mimo-v2.5-pro":
+        # MiMo is GQA + SWA with MXFP4 MoE experts — a different tensor layout
+        # from the MLA converter below. The conversion routine has to be written
+        # against the MiMo checkpoint structure; raise rather than emit garbage.
+        raise NotImplementedError(
+            "MiMo-V2.5-Pro weight conversion is not implemented yet. MiMo uses "
+            "GQA + sliding-window attention and MXFP4 (block 32) MoE experts, "
+            "which need a dedicated converter (the current one assumes MLA + "
+            "FP8). Implement a MiMo branch of WeightConverter that: (1) shards "
+            "GQA q/k/v/o_proj across 8 devices, keeping o_proj out of FP4; "
+            "(2) repacks routed-expert weights as MXFP4 blocks; (3) copies the "
+            "BF16 DFlash drafter. Until then, obtain pre-converted weights from "
+            "the TileRT team or run only the plumbing tests."
+        )
     else:
-        raise ValueError(f"Invalid model type: {model_type}")
+        raise ValueError(
+            f"Invalid model type: {model_type}. "
+            "Supported: deepseek-v32, glm-5, kimi-k2.6, mimo-v2.5-pro."
+        )
 
     converter = WeightConverter(model_args, 8, args.model_dir, args.save_dir, args.test_mode)
     if args.append_mtp:

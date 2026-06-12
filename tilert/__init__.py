@@ -43,6 +43,13 @@ logger = init_logging()
 _BACKENDS = {
     "deepseek_v3_2": "libtilert_dsv32.so",
     "glm5": "libtilert_glm5.so",
+    # Skeleton backends (feat/mimo-kimi-backend): the matching .so files are not
+    # yet open-sourced. load_backend() will raise a clear "Backend library not
+    # found" error for these until the libraries are dropped into the package.
+    "mimo_v2": "libtilert_mimo.so",
+    # Kimi-K2.6 is MLA (DeepSeek family); it MAY run on the dsv32 backend (see
+    # tilert/models/kimi_k2/generator.py path A). The dedicated name is reserved.
+    "kimi_k2": "libtilert_kimi.so",
 }
 
 _loaded_backend: str | None = None
