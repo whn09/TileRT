@@ -13,11 +13,13 @@ Two things are still required before this runs on real hardware:
      ``libtilert_dsv32.so`` can serve Kimi directly (shared MLA kernels), in
      which case the generator just needs the right ModelArgs + weight layout;
      otherwise a ``libtilert_kimi.so`` is needed. To be confirmed on-device.
-  2. Quantization: the open-source Kimi-K2.6 checkpoint is **INT4**
-     (compressed-tensors, group 32) on the MoE experts — NOT NVFP4. If an
-     NVFP4 variant is the target, the weight converter must emit NVFP4 blocks
-     and the backend must expose an NVFP4 expert GEMM. See ``model_args`` /
-     ``weight_converter`` for the configurable ``moe_quant`` field.
+  2. Quantization: two checkpoints exist, differing only in MoE-expert format —
+       - ``nvidia/Kimi-K2.6-NVFP4``  -> NVFP4 (float4, group 16)  [B200 target]
+       - ``moonshotai/Kimi-K2.6``    -> INT4 (compressed-tensors, group 32)
+     Both keep self_attn / shared_experts / lm_head / layer 0 in higher
+     precision. The default ``moe_quant`` is NVFP4; the backend must expose a
+     matching NVFP4 expert GEMM. NVIDIA exports the NVFP4 build with
+     ``model_type == "deepseek_v3"``, reinforcing the DeepSeek-backend reuse path.
 """
 
 from tilert.models.kimi_k2.model_args import ModelArgsKimiK2

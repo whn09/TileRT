@@ -72,6 +72,8 @@ def _check_model_args() -> bool:
         ("Kimi n_layers", k.n_layers, 61),
         ("Kimi q_lora_rank (MLA)", k.q_lora_rank, 1536),
         ("Kimi n_routed_experts", k.n_routed_experts, 384),
+        ("Kimi moe_quant (NVFP4 build)", k.moe_quant, "nvfp4"),
+        ("Kimi moe_quant_block_size", k.moe_quant_block_size, 16),
     ]
     ok = True
     for name, got, want in checks:

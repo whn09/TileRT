@@ -39,20 +39,27 @@ Pulled from the published HF `config.json`s:
   needs all-new attention + MXFP4-MoE kernels in its `.so`.
 - **Kimi-K2.6** — text backbone is **MLA** (q_lora 1536 / kv_lora 512), 61
   layers, 384 experts, sigmoid `noaux_tc` routing. This is the *same family as
-  DeepSeek-V3.2*, so the existing `libtilert_dsv32.so` may run it directly.
-  Note: the open checkpoint quantizes experts to **INT4** (compressed-tensors,
-  group 32), **not NVFP4** — `moe_quant` is configurable for either.
+  DeepSeek-V3.2*, so the existing `libtilert_dsv32.so` may run it directly —
+  reinforced by NVIDIA exporting their checkpoint as `model_type=deepseek_v3`.
+  Two quant builds exist (only routed experts quantized; attn/shared/lm_head/
+  layer 0 stay higher precision):
+    - `nvidia/Kimi-K2.6-NVFP4` — **NVFP4** (float4, group 16) — **B200 target**
+    - `moonshotai/Kimi-K2.6` — INT4 (compressed-tensors, group 32)
+  `moe_quant` defaults to NVFP4; switch to `int4` for the Moonshot checkpoint.
 
 ## Next-week on-device checklist
 
 1. `python scripts/preflight_mimo_kimi.py --model-weights-dir <dir>` — confirms
    8×B200, backend registration, and that the CLI path fails *only* at the
    missing-kernel boundary (no import/attr errors).
-2. **Kimi path A (cheapest test):** convert Kimi weights
-   (`weight_converter --model_type kimi-k2.6`), then
+2. **Kimi path A (cheapest test):** pull `nvidia/Kimi-K2.6-NVFP4` (NVFP4 build,
+   exported as `deepseek_v3`), convert with
+   `weight_converter --model_type kimi-k2.6`, then
    `TILERT_KIMI_REUSE_DSV32=1 python -m tilert.generate --model kimi_k2 ...`.
-   If the DeepSeek MLA kernels accept Kimi's shapes, you get real numbers today.
-   **Verify output correctness before trusting throughput.**
+   If the DeepSeek MLA kernels accept Kimi's shapes AND a NVFP4 expert GEMM is
+   present in the .so, you get real numbers today. **Verify output correctness
+   before trusting throughput.** (If the dsv32 .so only has an FP8 expert GEMM,
+   the NVFP4 experts won't load — that's the one thing to check first on-box.)
 3. **MiMo:** blocked on `libtilert_mimo.so`. Once obtained: drop it in `tilert/`,
    implement the kernel calls in `mimo_v2/modules/end2end.py` against the ops it
    registers (see `mimo_v2/ops/__init__.py`), and write the MiMo branch of

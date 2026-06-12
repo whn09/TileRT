@@ -6,10 +6,16 @@ DeepSeek-V3.2, so this dataclass deliberately mirrors
 ``deepseek_v3_2.model_args.ModelArgs`` field-for-field, overriding only the
 values that differ (vocab, experts, routing, rope_theta, seq len).
 
-Quantization note: the released checkpoint quantizes MoE experts to **INT4**
-(group_size 32, compressed-tensors), keeping attention / shared-experts / dense
-MLP / lm_head / vision in higher precision. ``moe_quant`` is configurable so the
-same args can describe an INT4 or a (hypothetical) NVFP4 build.
+Two published checkpoints differ only in MoE-expert quantization; everything
+else (attention, shared experts, dense MLP, lm_head, layer 0, vision) stays at
+higher precision in both:
+  - ``moonshotai/Kimi-K2.6``            -> INT4 (compressed-tensors, group 32)
+  - ``nvidia/Kimi-K2.6-NVFP4``          -> NVFP4 (float, num_bits 4, group 16)
+
+The NVFP4 build is the one to target on B200 (native FP4 tensor cores). Notably
+NVIDIA exports it with ``text_config.model_type == "deepseek_v3"`` — i.e. they
+treat Kimi's backbone as DeepSeek-V3 — which is strong corroboration that the
+DeepSeek-V3.2 MLA kernels can drive Kimi. ``moe_quant`` selects the format.
 """
 
 from dataclasses import dataclass
@@ -33,10 +39,14 @@ class ModelArgsKimiK2:
     scale_fmt: str | None = None
 
     # ---- MoE-expert quantization ----
-    # Open-source checkpoint: INT4 (compressed-tensors, group 32). Set to
-    # "nvfp4" if/when an NVFP4 build is produced for B200.
-    moe_quant: Literal["bf16", "fp8", "int4", "nvfp4"] = "int4"
-    moe_quant_block_size: int = 32
+    # Default to NVFP4 (nvidia/Kimi-K2.6-NVFP4): float, num_bits 4, group 16 —
+    # the build meant for B200 native FP4 tensor cores. Switch to "int4"
+    # (group 32) for the moonshotai/Kimi-K2.6 compressed-tensors checkpoint.
+    # Only routed experts are quantized; self_attn / shared_experts / lm_head /
+    # layer 0 stay at higher precision.
+    moe_quant: Literal["bf16", "fp8", "int4", "nvfp4"] = "nvfp4"
+    # NVFP4 group size is 16; INT4 checkpoint uses 32. Kept in sync with moe_quant.
+    moe_quant_block_size: int = 16
 
     # ---- dimensions ----
     vocab_size: int = 163840
