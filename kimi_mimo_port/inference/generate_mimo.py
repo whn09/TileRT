@@ -128,16 +128,24 @@ def _load_weights(modelm, args, ckpt, idx, cache, rank, ws):
     emb = g("model.embed_tokens.weight")
     vp = args.vocab_size // ws
     modelm.embed.weight.data.copy_(emb[rank*vp:(rank+1)*vp].to(dev))
+    # MiMo RMSNorm uses the (1 + weight) convention (Gemma-style): stored norm
+    # weights are ~0 (mean ~0.013), so the effective scale is 1 + w. ds.RMSNorm
+    # multiplies by raw weight, so we bake the +1 in at load time.
+    NORM_PLUS_ONE = True
+    def _norm(t):
+        t = t.to(dev).float()
+        return (t + 1.0) if NORM_PLUS_ONE else t
+
     # final norm + head
-    modelm.norm.weight.data.copy_(g("model.norm.weight").to(dev))
+    modelm.norm.weight.data.copy_(_norm(g("model.norm.weight")))
     head = g("lm_head.weight")
     modelm.head.weight.data.copy_(head[rank*vp:(rank+1)*vp].to(dev).float())
 
     n_local_kv = max(1, args.num_key_value_heads // ws)
     for lid, blk in enumerate(modelm.layers):
         p = f"model.layers.{lid}."
-        blk.attn_norm.weight.data.copy_(g(p+"input_layernorm.weight").to(dev))
-        blk.ffn_norm.weight.data.copy_(g(p+"post_attention_layernorm.weight").to(dev))
+        blk.attn_norm.weight.data.copy_(_norm(g(p+"input_layernorm.weight")))
+        blk.ffn_norm.weight.data.copy_(_norm(g(p+"post_attention_layernorm.weight")))
         # attention: fused qkv (FP8) sharded by heads; o_proj bf16; sink
         _load_attn(blk.attn, p, g, dev, args, ws, rank)
         if lid < args.n_dense_layers:

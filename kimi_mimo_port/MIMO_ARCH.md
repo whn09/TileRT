@@ -120,3 +120,15 @@ torchrun --nproc-per-node 8 generate_mimo.py \
 ### 收尾状态（机器到期）
 全管线跑通；数值未对齐（乱码）。最可能的下一个修复是 RMSNorm 的 (1+w) 约定。
 所有代码 + 诊断已 commit。这是"还差几个数值约定 bug"的状态，非架构障碍。
+
+### RMSNorm (1+w) 修复验证（最后一步）
+应用 `(1 + weight)` 后，输出从"单 token 死循环"变成"有变化的多 token" —— 证实 RMSNorm
+(1+weight) 约定**方向正确**，数值在朝合理方向走，但仍乱码：还有其它数值约定 bug 未解
+（qkv 行顺序 / partial RoPE 细节 / sink 语义之一或多个）。
+
+## 最终状态（机器到期）
+- ✅ 架构完整逆向 + 实现（无官方 modeling 参考）
+- ✅ 全管线在 8×B200 跑通（加载/70层前向/8卡NCCL/解码）
+- ✅ 已修 4 个 bug：qkv reshape、fp8-dtype 污染、HF rotate_half RoPE、RMSNorm (1+w)
+- ⚠️ 仍乱码：还差 1-N 个数值约定 bug，需逐层对照（MiMo 无公开 modeling，最难点）
+- 属"工程可完成、非架构障碍"，预计还需数小时逐层 debug（理想情况有 HF 参考实现可对照会快很多）
