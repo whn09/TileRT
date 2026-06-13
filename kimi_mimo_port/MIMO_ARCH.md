@@ -107,3 +107,16 @@ torchrun --nproc-per-node 8 generate_mimo.py \
 **诚实评估**：全管线已通（加载/前向/8卡/解码），数值对齐是跨架构移植最耗时的一环，
 通常需逐层对照 HF 参考激活值；MiMo 未开源 modeling 使其更难。属"工程可完成但需更多时间"
 的状态，非架构性障碍。
+
+### 进一步诊断（接近机器到期）
+- dense MLP 权重 dequant 正常（std 0.009）、加载正常（bf16）、forward 对随机输入正常（out std 0.24）。
+- 但真实 forward 中 dense FFN 输出 std 42 / absmax 2880 —— 用随机输入复现不出，
+  说明是**真实激活的 outlier 维度**被放大（LLM 常见 massive activation），未必是 bug。
+- **关键疑点**：`attn_norm.weight` mean≈0.013 / std≈0.027（异常小，正常 RMSNorm 权重 ~1.0）。
+  强烈怀疑 MiMo 的 RMSNorm 采用 **(1 + weight)** 约定（类 Gemma），而当前 ds.RMSNorm
+  直接用 `weight`。这会系统性地改变所有 norm 的缩放 → 数值整体错乱 → 乱码。
+  **下一步首选修复**：把 MiMo 的 RMSNorm 改成 `x_normed * (1 + weight)` 再验证。
+
+### 收尾状态（机器到期）
+全管线跑通；数值未对齐（乱码）。最可能的下一个修复是 RMSNorm 的 (1+w) 约定。
+所有代码 + 诊断已 commit。这是"还差几个数值约定 bug"的状态，非架构障碍。
