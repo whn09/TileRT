@@ -225,3 +225,33 @@ KeyError: 'model.layers.1.mlp.experts.w2_weight_scale'
 该 dev 镜像版本未完全支持的权重加载路径。可能需要：① 精确复刻 16卡多节点配置；
 ② 或一个 MiMo-FP4 支持更完整的 sglang 版本；③ 或权重预处理成 SGLang 期望的
 stacked/fused 格式。非单节点几次试错能解决。
+
+---
+
+## SGLang MiMo+DFlash via PR #27638（2026-06-13，深入但受限于硬件）
+
+PR #27638（csAugust:mimo-v2-fp4-dflash）专门加 MiMo-V2.5-Pro FP4 + DFlash 支持。
+用 PYTHONPATH 把 PR 的 sglang python 覆盖进 dev 镜像，**逐一突破**：
+1. ✅ 权重加载（PR 的 mxfp4→FP8 dequant，过了 `w2_weight_scale` KeyError）
+2. ✅ attention backend：fa3 在 B200(SM100) 被硬断言挡（只支持 SM8/9）；**fa4 无此断言且支持 sink** → 用 fa4
+3. ✅ cuda graph 在 B200+PR 下编译崩 → `--disable-cuda-graph` 绕过
+4. ✅ server fired up（tp8 + enable-dp-attention dp=1 + fa4 + patch）
+5. ⚠️ 但**推理时崩**：`prepare_mlp_sync_batch` → `num_tokens // None`
+   （`num_tokens_per_req`/`num_tokens_per_batch` 均 None）。已 patch 第一个
+   AttributeError，又冒出 None 除法。
+
+**根本硬约束（关键）**：错误信息明确——
+```
+MiMoV2ForCausalLM requires effective attention TP size 8 because its fused
+qkv_proj weights are TP=8-interleaved; got 4 (tp8, dp2, dp-attention)
+```
+MiMo 的 fused qkv 是 **TP=8 交错打包**（即用户最初指出的交错布局），所以
+**有效 attn-TP 必须=8**。而 MiMo 又**必须 enable-dp-attention + dp=2**
+（用户确认 + PR 设计）。dp=2 会把 attn-TP 砍成 4 ≠ 8。
+**同时满足 dp=2 + attn-TP=8 需要 16 卡**（PR 原命令正是 tp16/dp2，2 节点）。
+单节点 8 卡数学上无法满足 → DFlash 的 DP 代码路径在 dp=1 下未被 PR 验证、有 None bug。
+
+**结论**：SGLang MiMo+DFlash 已推进到"仅差正确的 16 卡 2 节点配置"。所有软件障碍
+（权重/backend/cuda graph）都已解决，剩下的是**硬件规模**：需要 2×8 B200 节点跑
+tp16/dp2 才能既满足 qkv 的 attn-TP=8 又满足 MiMo 要求的 dp=2。本次单节点 8 卡是硬件
+不足，非软件不可行。

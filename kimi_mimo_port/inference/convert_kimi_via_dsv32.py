@@ -67,12 +67,15 @@ def main():
     model_args.vocab_size = 163840  # Kimi vocab
     model_args.n_routed_experts = 384  # Kimi has 384 experts (DeepSeek 256)
     model_args.n_activated_experts = 8
+    model_args.n_dense_layers = 1  # Kimi first_k_dense_replace=1 (DeepSeek=3)
     print(f"Kimi ModelArgs: n_heads={model_args.n_heads}, experts={model_args.n_routed_experts}, vocab={model_args.vocab_size}")
 
     converter = wc.WeightConverter(model_args, 8, args.model_dir, args.save_dir, args.test_mode)
     # Kimi-K2-Instruct has NO MTP/nextn layer (DeepSeek-V3.2 has layer 61 MTP).
     # Drop it so the converter doesn't try to load a non-existent layer.
     converter.num_mtp_layers = 0
+    converter.num_dense_layers = 1  # Kimi first_k_dense_replace=1
+    converter.num_moe_layers = model_args.n_layers - converter.num_dense_layers
     converter.total_layers = converter.num_dense_layers + converter.num_moe_layers
     if args.test_mode:
         converter.target_layers = [0, converter.num_dense_layers, converter.total_layers - 1]
