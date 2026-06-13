@@ -115,3 +115,23 @@ full-MLA bypass 的 mask 广播写错：应 `scores += mask[None,:,None,:]`
 ### 对 MiMo 的意义
 同一套方法论（改 config + 绕过架构差异 + cu128 源码编译 tilelang）可直接用于 MiMo，
 且 MiMo 的 GQA+SWA+MXFP4 kernel 在 TileOPs(`../TileOPs`) 里都有。这是通往 MiMo 的可行路径。
+
+---
+
+## 性能实测（2026-06-13，B200，单请求纯 decode）
+
+| 路线 | Kimi-K2 OTPS | TPOT | 性质 |
+|---|---|---|---|
+| **tilelang example（本移植）** | **6.86 tok/s** | 145.8 ms | 能跑、正确，但极慢 |
+| SGLang（之前实测） | 137 tok/s | 7.3 ms | 生产级推理引擎 |
+| 闭源 TileRT 引擎 | 跑不了 Kimi | — | (DeepSeek/GLM 200-687) |
+
+**为什么 6.86 这么慢**：这是 example 级 PyTorch 推理——每算子单独 launch、无 kernel
+融合 / CUDA graph / 持久化调度（正是 TileRT 引擎要消灭的 execution gap）；tilelang JIT
+只优化了少数 kernel（act_quant/mla decode），MoE 的 384 专家是朴素 PyTorch 实现，极慢；
+逐 token、无投机解码。
+
+**结论**：本路线证明了"开源栈能让 TileRT 官方不支持的模型跑出正确结果"（可行性 ✅），
+但性能比 SGLang 慢 ~20×，**无实用价值**。若只求 Kimi 在 B200 上跑得快，应直接用 SGLang。
+tilelang 路线的价值是"用开源 kernel 自建推理"的起点 / MiMo 正确性参考实现，
+而非高性能方案。
