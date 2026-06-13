@@ -623,8 +623,12 @@ class MLA(nn.Module):
                 index_mask += mask
                 scores += index_mask.unsqueeze(2)
             else:
-                # Standard full MLA (Kimi-K2): just the causal mask
-                scores += mask.unsqueeze(2)
+                # Standard full MLA (Kimi-K2): just the causal mask.
+                # scores is [bsz, seqlen, n_local_heads, seqlen] (bsht); the 2D
+                # causal mask [seqlen, seqlen] must broadcast as [1, s, 1, t]
+                # (batch + head dims broadcast), NOT mask.unsqueeze(2) which
+                # collides head dim with the key-length dim.
+                scores += mask[None, :, None, :]
 
             scores = scores.softmax(dim=-1, dtype=torch.float32)
             x = torch.einsum("bsht,bthd->bshd", scores.type_as(x), v)

@@ -47,7 +47,7 @@ torchrun --nproc-per-node 8 generate.py \
 
 - [x] 代码改造完成（model.py / convert.py / config）
 - [ ] 转换 Kimi 权重
-- [ ] 跑通正确性
+- [x] 跑通正确性 ✅ (CUDA12.8 + 源码编译 tilelang)
 - [ ] 性能基线
 
 ## 注意
@@ -82,3 +82,36 @@ nvcc 编译（`tl_shuffle_elect<0>` 模板实例化错误 + `tma_load` 重载不
 tilelang 工具链在 B200+CUDA13 的环境兼容性问题，需要修 tilelang C++ codegen 并重新编译
 tilelang（已 clone 到同级 `../tilelang`），或换一个 tilelang+CUDA 版本匹配的镜像。
 这对最终的 MiMo 目标是同一个前置依赖（MiMo 也要靠 tilelang 编译 kernel）。
+
+---
+
+## ✅ 成功跑通（2026-06-13，B200）
+
+**Kimi-K2 在开源 tilelang 栈上生成正确输出：**
+```
+Prompt:     What is the capital of France? Answer in one sentence.
+Completion: Paris is the capital of France.
+```
+
+### 解锁的关键：CUDA 版本
+之前 kernel 编译失败的根因 = **CUDA 13 与 tilelang 稳定目标 12.8 不匹配**。
+tilelang 官方 CI/Dockerfile 用 CUDA-12.8（CUDA-13.0 仅 Nightly）。
+
+正确环境（与闭源 TileRT 的 cu13 容器隔离，互不影响）：
+- 镜像：`nvcr.io/nvidia/pytorch:25.01-py3`（CUDA 12.8）
+- tilelang：**源码编译** `0.1.11+cu128`（pip 预编译 wheel 有 FFI 冲突，必须源码装）
+- 额外：`pip install transformers tiktoken blobfile`
+
+### 最后一个 bug（我自己的）
+full-MLA bypass 的 mask 广播写错：应 `scores += mask[None,:,None,:]`
+（scores 是 bsht，2D causal mask 要在 batch+head 维广播），而非 `mask.unsqueeze(2)`。
+
+### 性能定位（重要，避免误解）
+这是 **example 级 PyTorch 推理**，**不是闭源 TileRT 持久化引擎**：
+- ✅ 验证了"开源 tilelang 栈能支持 TileRT 官方不支持的新模型架构"
+- ❌ 拿不到 TileRT 引擎的 2× 低延迟（200-687 tok/s）
+- MiMo 若要 1000 tok/s 仍需官方 `libtilert_mimo.so`(cu13)；本路线是**正确性验证 / 过渡参考实现**
+
+### 对 MiMo 的意义
+同一套方法论（改 config + 绕过架构差异 + cu128 源码编译 tilelang）可直接用于 MiMo，
+且 MiMo 的 GQA+SWA+MXFP4 kernel 在 TileOPs(`../TileOPs`) 里都有。这是通往 MiMo 的可行路径。
