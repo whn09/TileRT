@@ -75,7 +75,11 @@ class MiMoBlock(nn.Module):
         super().__init__()
         self.attn = MiMoAttention(args, layer_id)
         if layer_id < args.n_dense_layers:
+            # bf16 dense MLP (weights pre-dequantized at load; avoid fp8 path)
             self.ffn = ds.MLP(args.dim, args.inter_dim)
+            self.ffn.w1 = ds.ColumnParallelLinear(args.dim, args.inter_dim, dtype=torch.bfloat16)
+            self.ffn.w2 = ds.RowParallelLinear(args.inter_dim, args.dim, dtype=torch.bfloat16)
+            self.ffn.w3 = ds.ColumnParallelLinear(args.dim, args.inter_dim, dtype=torch.bfloat16)
         else:
             self.ffn = MiMoMoE(args, layer_id)
         self.attn_norm = ds.RMSNorm(args.dim, args.eps)

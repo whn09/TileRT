@@ -23,31 +23,35 @@ from torch import nn
 
 def precompute_rope(head_dim: int, partial_factor: float, theta: float,
                     max_seq: int, device="cuda"):
-    """Precompute cos/sin for partial RoPE.
+    """Precompute cos/sin for partial RoPE, HF (transformers) convention.
 
-    Only the first ``rot_dim = round(head_dim * partial_factor)`` dims (rounded
-    to even) are rotated; the rest pass through unchanged.
+    MiMo uses transformers.modeling_rope_utils, i.e. the standard HF RoPE:
+    non-interleaved (rotate_half on first/second half) with cos/sin emb that
+    are duplicated over the rot_dim (cat([freqs, freqs])).
+    Only the first ``rot_dim = round(head_dim * partial_factor)`` dims rotate.
     """
     rot_dim = int(round(head_dim * partial_factor))
     rot_dim -= rot_dim % 2
     inv_freq = 1.0 / (theta ** (torch.arange(0, rot_dim, 2, device=device).float() / rot_dim))
     t = torch.arange(max_seq, device=device).float()
-    freqs = torch.outer(t, inv_freq)  # [max_seq, rot_dim/2]
-    return torch.cos(freqs), torch.sin(freqs), rot_dim
+    freqs = torch.outer(t, inv_freq)          # [max_seq, rot_dim/2]
+    emb = torch.cat([freqs, freqs], dim=-1)   # [max_seq, rot_dim]  (HF style)
+    return torch.cos(emb), torch.sin(emb), rot_dim
+
+
+def _rotate_half(x):
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2:]
+    return torch.cat([-x2, x1], dim=-1)
 
 
 def apply_partial_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
                        rot_dim: int) -> torch.Tensor:
-    """Apply RoPE to the first ``rot_dim`` dims of x [b, s, h, d]; pass rest through."""
+    """HF-style partial RoPE on x [b, s, h, d]: rotate first rot_dim dims, pass rest."""
     x_rot, x_pass = x[..., :rot_dim], x[..., rot_dim:]
-    # interleaved (real, imag) pairs
-    x1 = x_rot[..., 0::2]
-    x2 = x_rot[..., 1::2]
-    c = cos[None, :, None, :]  # [1, s, 1, rot/2]
+    c = cos[None, :, None, :]  # [1, s, 1, rot_dim]
     s = sin[None, :, None, :]
-    rx1 = x1 * c - x2 * s
-    rx2 = x1 * s + x2 * c
-    x_rot_out = torch.stack([rx1, rx2], dim=-1).flatten(-2)
+    x_rot_out = x_rot * c + _rotate_half(x_rot) * s
     return torch.cat([x_rot_out, x_pass], dim=-1)
 
 
@@ -77,10 +81,13 @@ class MiMoAttention(nn.Module):
         qsz = self.n_heads * self.head_dim
         ksz = self.n_kv * self.head_dim
         vsz = self.n_kv * self.v_head_dim
-        # fused qkv (col-parallel); o_proj row-parallel, unquantized
+        # fused qkv (col-parallel); o_proj row-parallel.
+        # IMPORTANT: weights are pre-dequantized to bf16 at load time, so force
+        # bf16 here — otherwise ds.Linear inherits the global fp8 dtype, allocates
+        # 1-byte weights + scale, and the bf16 copy_ silently corrupts to zeros.
         from model import ColumnParallelLinear, RowParallelLinear
-        self.qkv_proj = ColumnParallelLinear(args.dim, qsz + ksz + vsz)
-        self.o_proj = RowParallelLinear(self.n_heads * self.v_head_dim, args.dim)
+        self.qkv_proj = ColumnParallelLinear(args.dim, qsz + ksz + vsz, dtype=torch.bfloat16)
+        self.o_proj = RowParallelLinear(self.n_heads * self.v_head_dim, args.dim, dtype=torch.bfloat16)
         self._qkv_split = (qsz, ksz, vsz)
 
         self.has_sink = (args.add_swa_attention_sink_bias if self.is_swa

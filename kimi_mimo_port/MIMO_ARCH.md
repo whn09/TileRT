@@ -89,3 +89,21 @@ torchrun --nproc-per-node 8 generate_mimo.py \
 5. MoE 路由 norm_topk_prob / route_scale
 
 这是跨架构移植的典型"流程通→调数值"阶段，和 Kimi 当时一样（Kimi 也是先跑通再修 mask）。
+
+### 调试进展更新
+- ✅ 修复 bug #1：qkv 权重 reshape（`[heads, head_dim, dim]`）
+- ✅ 修复 bug #2（关键）：dense MLP + attention 的 Linear 被全局 fp8 dtype 污染，
+  bf16 权重 copy 进 fp8 张量变全零 → 强制 qkv_proj/o_proj/dense-MLP 用 bf16。
+  修复后 layer 输出不再全零（layer0 std 42）。
+- ✅ 修复 bug #3：partial RoPE 改为 HF rotate_half 约定（non-interleaved）。
+- ⚠️ 仍乱码（重复单 token）。layer0 absmax 2880 偏大，怀疑 attention 输出量级/
+  qkv-split 顺序/sink 处理仍有数值 bug。
+
+**剩余待查**（需对比参考实现，但 MiMo 官方无公开 modeling）：
+1. fused_qkv 行顺序（是否 head-interleaved，非简单 [Q|K|V] 连续块）
+2. attention 输出量级（softmax_scale / value_scale 0.612 的应用位置）
+3. attention sink 归一化语义
+
+**诚实评估**：全管线已通（加载/前向/8卡/解码），数值对齐是跨架构移植最耗时的一环，
+通常需逐层对照 HF 参考激活值；MiMo 未开源 modeling 使其更难。属"工程可完成但需更多时间"
+的状态，非架构性障碍。
