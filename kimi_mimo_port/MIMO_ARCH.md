@@ -179,3 +179,20 @@ qkv reshape → fp8-dtype 污染(全零) → HF rotate_half RoPE → 误加(1+w)
 **性能优化路径（若要快）**：① MoE 改用 TileOPs 的 MXFP4 grouped-GEMM（免 dequant）；
 ② attention 换 TileOPs gqa_sliding_window kernel；③ 持久化引擎级融合 ≈ 复刻 TileRT 核心。
 1000 tok/s 仍需官方 libtilert_mimo.so。
+
+---
+
+## 性能优化尝试：tilelang MXFP4 fused GEMM（perf path 起点）
+
+瓶颈定位（单 token decode，1 个 MoE 层 8.14ms）：
+- gate 路由 0.09ms（可忽略）
+- **8 专家 × 0.88ms = 7.07ms（瓶颈）**，每专家 = 3 个 MXFP4 dequant+GEMM
+
+tilelang fused MXFP4 GEMM 验证（`examples/dequantize_gemm/..._mxfp4_hopper.py` 的 matmul）：
+- **速度：0.078ms vs PyTorch dequant+gemm 0.305ms = 3.9x 加速** ✓
+- **数值：rel_err 1.0 ❌（未对齐）** —— 我的 PyTorch dequant 解包与 example torch_convert
+  数值一致（code3=1.5, ×scale 0.000488=0.0007 ✓），故差异在 kernel 的 GEMM 转置约定
+  （tilelang B[N,K] 布局 vs F.linear x@w.T）或 scale 应用语义。可调但需迭代。
+- kernel 调用签名：`(A[M,K]bf16, B[N,K/2]u8, Scale[N,K/32]u8, Bias[M,N]bf16) -> C[M,N]`
+
+→ MXFP4 kernel 加速潜力确认（~4x），数值对齐是下一步。但更优先：试 SGLang+DFlash。
