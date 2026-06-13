@@ -169,9 +169,10 @@ def _load_attn(attn, p, g, dev, args, ws, rank):
     qsz, ksz, vsz = nh*hd, nkv*hd, nkv*vhd
     qp, kp, vp_ = qkv_bf[:qsz], qkv_bf[qsz:qsz+ksz], qkv_bf[qsz+ksz:]
     lh = nh // ws; lkv = max(1, nkv // ws)
-    qp = qp.view(nh, hd)[rank*lh:(rank+1)*lh].reshape(-1, args.dim)
-    kp = kp.view(nkv, hd)[rank*lkv:(rank+1)*lkv].reshape(-1, args.dim)
-    vp_ = vp_.view(nkv, vhd)[rank*lkv:(rank+1)*lkv].reshape(-1, args.dim)
+    # each weight row-block is [heads*head_dim, dim]; view as [heads, head_dim, dim]
+    qp = qp.view(nh, hd, args.dim)[rank*lh:(rank+1)*lh].reshape(-1, args.dim)
+    kp = kp.view(nkv, hd, args.dim)[rank*lkv:(rank+1)*lkv].reshape(-1, args.dim)
+    vp_ = vp_.view(nkv, vhd, args.dim)[rank*lkv:(rank+1)*lkv].reshape(-1, args.dim)
     attn.qkv_proj.weight.data.copy_(torch.cat([qp, kp, vp_], 0).to(attn.qkv_proj.weight.dtype))
     # o_proj bf16 [dim, nh*vhd] row-parallel
     o = g(p+"self_attn.o_proj.weight").to(dev)

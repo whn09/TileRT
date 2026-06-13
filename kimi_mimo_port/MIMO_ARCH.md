@@ -65,3 +65,27 @@ SWA 层参数（独立于全注意力）：
 5. fused_qkv 权重切分
 
 先求正确性（可先用纯 PyTorch attention，不追 kernel 性能），跑通后再换 tilelang kernel。
+
+---
+
+## 运行进度（2026-06-13，B200 cu128 容器 tl128）
+
+✅ **全管线跑通**：权重加载（22s，8卡分片 + FP8 dequant + MXFP4 uint8 加载）→ 70 层前向
+（GQA+SWA+partial RoPE+sink + MXFP4 MoE 路由）→ 8卡 NCCL allreduce → 采样 → 解码 → 输出。
+
+运行命令（NCCL 必须禁用 aws-ofi 插件，否则 NET/OFI 初始化失败崩溃）：
+```bash
+NCCL_NET_PLUGIN=none NCCL_NET=Socket NCCL_P2P_LEVEL=NVL \
+torchrun --nproc-per-node 8 generate_mimo.py \
+  --ckpt-path /nvme/models/MiMo-V2.5-Pro-FP4-DFlash --max-new-tokens 16
+```
+
+⚠️ **当前状态：管线通，但输出是乱码**（重复 token "2 thek is thek is..."）。
+即数值正确性还有 bug，高频嫌疑（待排查）：
+1. MXFP4 dequant 数值（nibble 高低位序 / E8M0 scale 2^(s-127) 偏移）
+2. fused_qkv 切分（Q/K/V 边界、head 排布 [heads,head_dim,dim] 假设）
+3. partial RoPE（rot_dim、交错 vs 前后半、cos/sin 索引）
+4. attention sink 归一化 / value_scale 0.612 位置
+5. MoE 路由 norm_topk_prob / route_scale
+
+这是跨架构移植的典型"流程通→调数值"阶段，和 Kimi 当时一样（Kimi 也是先跑通再修 mask）。
