@@ -135,3 +135,34 @@ full-MLA bypass 的 mask 广播写错：应 `scores += mask[None,:,None,:]`
 但性能比 SGLang 慢 ~20×，**无实用价值**。若只求 Kimi 在 B200 上跑得快，应直接用 SGLang。
 tilelang 路线的价值是"用开源 kernel 自建推理"的起点 / MiMo 正确性参考实现，
 而非高性能方案。
+
+---
+
+## TileScale 能否自建高性能持久化引擎？（深入调查结论，2026-06-13）
+
+**纠正之前的说法**：TileScale **是开源的**（C++，164★，TileLang 的分布式扩展，含 HDA 分层架构 + persistent 机制 + 分布式通信原语）。之前误称"闭源"，特此更正。
+
+**但关键结论不变**：用开源 TileLang/TileScale **无法低成本复刻 TileRT 的高性能引擎**。
+
+### 三层栈 vs TileRT 引擎
+
+| 层 | 开源 | 能力 |
+|---|---|---|
+| TileLang | ✅ | 单卡 kernel DSL |
+| TileScale | ✅ | TileLang 分布式扩展（多卡 tile 编程、通信原语、persistent kernel） |
+| TileOPs | ✅ | 基于 TileLang 的算子库（GQA/SWA/MXFP4/MoE 都有） |
+| **TileRT `libtilert_*.so`** | ❌ | **整模型→单一持久化引擎**的编译流程 + `dsa_show_hands` 运行时 |
+
+### 为什么 TileScale ≠ TileRT 引擎（代码证据）
+- `dsa_show_hands`（TileRT 引擎入口符号）只在 TileRT repo 出现，tilescale/tilelang/TileOPs 全搜不到。
+- TileScale 的 `persistent`（`src/transform/persist_threadblock.cc` 等）是**单 kernel 内 SM 常驻处理多 tile**，不是"跨多算子/整模型 fuse 成一个 kernel"。
+- TileScale 编译流程（`tilelang/engine/lower.py`）是**固定的单 PrimFunc 管道**，无 GraphLower/OperatorFusion/全局调度器。
+- 它自我定位为 "domain-specific language (DSL) and compiler stack"——写 kernel 的工具，不是模型推理引擎。
+- 连官方的 `examples/deepseek_v32/inference/model.py` 都是**标准 PyTorch for-loop 逐层调用**，没有任何整模型融合（这正是我们跑 Kimi 用的，6.86 tok/s）。
+
+### MiMo 终极路径的工程量判断
+- **用开源栈跑通 MiMo（正确性，example 级，~个位数 tok/s）**：几周工程。方法论已被 Kimi 验证：改 config + 绕架构差异 + 用 TileOPs 的 GQA-SWA/MXFP4 kernel + CUDA12.8 源码编译 tilelang。
+- **用开源栈达到 TileRT 式高性能（1000 tok/s 级）**：≈ 从头复刻 TileRT 核心（模型级 IR + 全局调度器 + 流式持久化引擎 + 通信重叠），**几个月/研究级**，因为"整模型→持久化引擎"的编译流程官方没开源。
+
+### 给最终决策的建议
+MiMo 要 1000 tok/s，**最现实的路径仍是等官方 `libtilert_mimo.so`**。开源自建只适合做"正确性参考实现"或"研究项目"，不适合追性能。若只要 MiMo 在 B200 上跑得快且能用，**SGLang 是当前最优解**（生产级，已验证 Kimi 137 tok/s）。
