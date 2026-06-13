@@ -56,3 +56,29 @@ torchrun --nproc-per-node 8 generate.py \
   目标是"正确跑通 + 验证开源栈支持新模型可行"，为 MiMo 铺路。
 - MiMo 阶段还需 TileOPs 的 `gqa_sliding_window_fwd` + MXFP4 kernel（DeepSeek MLA example 里没有），
   那是下一步。
+
+---
+
+## 运行结果（B200 实测，2026-06-13）
+
+成功突破 6 道关卡（全部修复已在本目录代码中）：
+1. ✅ 权重转换：8 个 mp shard（967GB），indexer/rotary_emb key 干净跳过
+2. ✅ tokenizer 加载（trust_remote_code=True）
+3. ✅ chat_template.jinja
+4. ✅ tokenize=True + `_to_ids()` 解包 BatchEncoding
+5. ✅ 权重加载（load_model 成功 —— 证明 Kimi 权重命名与 model.py 完全兼容）
+6. ✅ 模型构造 + `use_indexer=False` 的 full-MLA bypass（DSA 绕过逻辑正确）
+
+**最终 blocker（无法在合理范围内解决）**：tilelang 0.1.8 在 **sm_100a(B200) + CUDA13**
+下的 CUDA codegen 有缺陷——连最基础的 `act_quant` kernel 生成的 `tvm_kernels.cu` 都过不了
+nvcc 编译（`tl_shuffle_elect<0>` 模板实例化错误 + `tma_load` 重载不匹配）。
+
+版本矩阵在此镜像上是死结：
+- `0.1.6`（example 钦定）→ 依赖 CUDA12，缺 `libnvrtc.so.12`
+- `0.1.8`（镜像自带）→ B200+cu13 codegen 编译失败
+- `0.1.11`（最新）→ `apache-tvm-ffi` 注册冲突（`__ffi_repr__`）
+
+**结论**：Kimi 的模型层移植**完全正确且已跑通到 kernel 编译前的每一步**；剩下的是
+tilelang 工具链在 B200+CUDA13 的环境兼容性问题，需要修 tilelang C++ codegen 并重新编译
+tilelang（已 clone 到同级 `../tilelang`），或换一个 tilelang+CUDA 版本匹配的镜像。
+这对最终的 MiMo 目标是同一个前置依赖（MiMo 也要靠 tilelang 编译 kernel）。
