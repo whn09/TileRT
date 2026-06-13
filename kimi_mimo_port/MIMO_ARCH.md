@@ -196,3 +196,32 @@ tilelang fused MXFP4 GEMM 验证（`examples/dequantize_gemm/..._mxfp4_hopper.py
 - kernel 调用签名：`(A[M,K]bf16, B[N,K/2]u8, Scale[N,K/32]u8, Bias[M,N]bf16) -> C[M,N]`
 
 → MXFP4 kernel 加速潜力确认（~4x），数值对齐是下一步。但更优先：试 SGLang+DFlash。
+
+---
+
+## SGLang MiMo-FP4 + DFlash 尝试（2026-06-13，单节点 8 卡）
+
+**SGLang dev 镜像原生支持 MiMo**：`models/mimo_v2.py`、`mimo_v2_nextn.py` +
+`speculative/dflash_worker.py`（官方 DFlash 投机解码）。SGLang 正确识别
+`MiMoV2ForCausalLM` + Hybrid SWA + DFLASH 算法。
+
+**但权重加载失败**（4 次尝试，均卡在同一点）：
+```
+KeyError: 'model.layers.1.mlp.experts.w2_weight_scale'
+  mimo_v2.py:1461  param = params_dict[name]
+```
+试过的组合（都失败）：
+- `--quantization fp8`（匹配 config 的 quant_method）
+- `+ --moe-runner-backend flashinfer_mxfp4`
+- `+ --ep-size 8 --moe-dense-tp-size 1`（EP 模式，匹配 DeepEPMoE.make_expert_params_mapping）
+
+**根因**：MiMo 的 MXFP4 专家权重（`experts.N.down_proj.weight_scale`）经
+`make_expert_params_mapping` 映射到 `experts.w2_weight_scale`，但 FusedMoE 层在
+当前量化配置下未注册该参数 → KeyError。即 checkpoint 量化格式
+（`quant_method:fp8 + store_dtype:mxfp4`）与 SGLang FusedMoE 创建的参数集不匹配。
+
+**判断**：用户原命令是 16 卡 2 节点 + 完整 EP/DP（`--ep-size 16 --tp 16 --dp 2
+--enable-dp-attention --moe-a2a-backend`）精心调过的；单节点 8 卡触发了不同的、
+该 dev 镜像版本未完全支持的权重加载路径。可能需要：① 精确复刻 16卡多节点配置；
+② 或一个 MiMo-FP4 支持更完整的 sglang 版本；③ 或权重预处理成 SGLang 期望的
+stacked/fused 格式。非单节点几次试错能解决。
