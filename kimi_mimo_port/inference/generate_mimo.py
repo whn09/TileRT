@@ -103,9 +103,15 @@ def main(ckpt, max_new_tokens, prompt):
     tokens[0, :plen] = torch.tensor(ids, device="cuda")
 
     prev = 0
-    for cur in range(plen, total):
+    decode_times = []
+    WARMUP = 3  # first few decode steps include JIT/cache warmup
+    for i, cur in enumerate(range(plen, total)):
+        torch.cuda.synchronize(); t0 = time.time()
         logits = modelm.forward(tokens[:, prev:cur], prev)
         nxt = logits.argmax(-1)[0]
+        torch.cuda.synchronize()
+        if i >= WARMUP:
+            decode_times.append(time.time() - t0)
         tokens[0, cur] = nxt
         prev = cur
         if rank == 0:
@@ -115,6 +121,12 @@ def main(ckpt, max_new_tokens, prompt):
     if rank == 0:
         out = tok.decode(tokens[0, plen:].tolist(), skip_special_tokens=True)
         print("\n\n=== MiMo completion ===\n" + out)
+        if decode_times:
+            tpot = sum(decode_times) / len(decode_times) * 1000
+            print(f"\n=== MiMo perf (B200, bsz=1, example-level) ===")
+            print(f"measured decode steps: {len(decode_times)}")
+            print(f"TPOT: {tpot:.1f} ms/token")
+            print(f"OTPS: {1000.0/tpot:.3f} tokens/s")
     if ws > 1:
         dist.destroy_process_group()
 

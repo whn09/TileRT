@@ -160,3 +160,22 @@ accumulator、tp 分片策略）未照搬——本实现是 B200 + 纯 PyTorch +
 ### 全部已修 bug 汇总
 qkv reshape → fp8-dtype 污染(全零) → HF rotate_half RoPE → 误加(1+w)后撤销 →
 **qkv 交错布局 + phantom-scale padding（决定性）**。
+
+---
+
+## 性能实测（2026-06-13，B200，单请求纯 decode）
+
+| 引擎 / 模型 | OTPS | TPOT | 性质 |
+|---|---|---|---|
+| **MiMo tilelang example（本移植）** | **3.9 tok/s** | 255 ms | 正确但慢（dequant-on-use MoE）|
+| 参考：Kimi tilelang example | 6.86 tok/s | 146 ms | 同栈 |
+| 参考：SGLang（GLM/Kimi） | 130-180 tok/s | ~7 ms | 生产引擎 |
+| 参考：闭源 TileRT（GLM/DeepSeek）| 200-687 tok/s | 1.5-5 ms | 持久化引擎 |
+
+**为什么 3.9 tok/s**：MoE 每 token 把选中的 8 个专家权重从 MXFP4 现场 dequant 成 bf16
+（384 选 8，纯 PyTorch），是主要瓶颈；attention 也是纯 PyTorch SDPA、无 kernel 融合、
+无投机解码。这是"正确性参考实现"，非性能方案。
+
+**性能优化路径（若要快）**：① MoE 改用 TileOPs 的 MXFP4 grouped-GEMM（免 dequant）；
+② attention 换 TileOPs gqa_sliding_window kernel；③ 持久化引擎级融合 ≈ 复刻 TileRT 核心。
+1000 tok/s 仍需官方 libtilert_mimo.so。
