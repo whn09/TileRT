@@ -128,13 +128,12 @@ def _load_weights(modelm, args, ckpt, idx, cache, rank, ws):
     emb = g("model.embed_tokens.weight")
     vp = args.vocab_size // ws
     modelm.embed.weight.data.copy_(emb[rank*vp:(rank+1)*vp].to(dev))
-    # MiMo RMSNorm uses the (1 + weight) convention (Gemma-style): stored norm
-    # weights are ~0 (mean ~0.013), so the effective scale is 1 + w. ds.RMSNorm
-    # multiplies by raw weight, so we bake the +1 in at load time.
-    NORM_PLUS_ONE = True
+    # MiMo uses STANDARD RMSNorm (weight * x), confirmed against the reference
+    # modeling + raw weights (model.norm.weight mean ~3.8, layer norms have
+    # normal spread). An earlier (1+w) guess was wrong — layer0 zeros were the
+    # fp8-dtype-pollution bug, not a norm-convention issue.
     def _norm(t):
-        t = t.to(dev).float()
-        return (t + 1.0) if NORM_PLUS_ONE else t
+        return t.to(dev).float()
 
     # final norm + head
     modelm.norm.weight.data.copy_(_norm(g("model.norm.weight")))
@@ -167,17 +166,48 @@ def _load_weights(modelm, args, ckpt, idx, cache, rank, ws):
                     s.data.copy_(g(f"{ep}{name}_proj.weight_scale").to(dev))
 
 
+def _split_qkv_fused(qkv_w, qkv_s, nh, nkv, hd, vhd):
+    """Split MiMo's interleaved fused qkv_proj into q/k/v (bf16).
+
+    Layout (cross-validated vs sglang, per whn09's Neuron port): NOT
+    [all_Q | all_K | all_V] but num_kv_heads interleaved groups, each
+    [hpg Q heads, 1 K head, 1 V head]. FP8 block scales carry phantom-row
+    padding per group (q 24 + k 2 + v 1 = 27 blocks -> 3456 padded rows),
+    so dequant must pad each group to 3456, scale, then strip back to 3392.
+    """
+    in_f = qkv_w.shape[1]
+    hpg = nh // nkv
+    qg, kg, vg = hpg * hd, hd, vhd
+    R = qg + kg + vg
+    BLK = 128
+    qsr = qg // BLK
+    ksr = (kg + BLK - 1) // BLK
+    vsr = (vg + BLK - 1) // BLK
+    spg = qsr + ksr + vsr                 # scale rows per group (27)
+    padded = spg * BLK                    # 3456
+    if qkv_w.dtype != torch.float8_e4m3fn or qkv_s is None:
+        w = qkv_w.to(torch.float32).view(nkv, R, in_f)
+    else:
+        scols = (in_f + BLK - 1) // BLK
+        wf = qkv_w.to(torch.float32).view(nkv, R, in_f)
+        wp = torch.zeros(nkv, padded, in_f, dtype=torch.float32, device=wf.device)
+        wp[:, :R, :] = wf
+        s = qkv_s.to(torch.float32).view(nkv, spg, scols)
+        se = s.repeat_interleave(BLK, 1).repeat_interleave(BLK, 2)[:, :padded, :in_f]
+        w = (wp * se)[:, :R, :]
+    q = w[:, :qg, :].reshape(nkv * qg, in_f).to(torch.bfloat16)
+    k = w[:, qg:qg+kg, :].reshape(nkv * kg, in_f).to(torch.bfloat16)
+    v = w[:, qg+kg:, :].reshape(nkv * vg, in_f).to(torch.bfloat16)
+    return q, k, v
+
+
 def _load_attn(attn, p, g, dev, args, ws, rank):
-    # fused qkv weight [Q+K+V, dim] FP8; split into per-rank head shards
-    qkv = g(p+"self_attn.qkv_proj.weight")
-    qkv_s = g(p+"self_attn.qkv_proj.weight_scale_inv")
-    from mimo_quant import dequant_fp8_blockwise
-    qkv_bf = dequant_fp8_blockwise(qkv.to(dev), qkv_s.to(dev))
     nh, nkv, hd, vhd = args.num_attention_heads, args.num_key_value_heads, args.head_dim, args.v_head_dim
-    qsz, ksz, vsz = nh*hd, nkv*hd, nkv*vhd
-    qp, kp, vp_ = qkv_bf[:qsz], qkv_bf[qsz:qsz+ksz], qkv_bf[qsz+ksz:]
+    qkv = g(p+"self_attn.qkv_proj.weight").to(dev)
+    qkv_s = g(p+"self_attn.qkv_proj.weight_scale_inv")
+    qkv_s = qkv_s.to(dev) if qkv_s is not None else None
+    qp, kp, vp_ = _split_qkv_fused(qkv, qkv_s, nh, nkv, hd, vhd)  # [nh*hd,dim],[nkv*hd,dim],[nkv*vhd,dim]
     lh = nh // ws; lkv = max(1, nkv // ws)
-    # each weight row-block is [heads*head_dim, dim]; view as [heads, head_dim, dim]
     qp = qp.view(nh, hd, args.dim)[rank*lh:(rank+1)*lh].reshape(-1, args.dim)
     kp = kp.view(nkv, hd, args.dim)[rank*lkv:(rank+1)*lkv].reshape(-1, args.dim)
     vp_ = vp_.view(nkv, vhd, args.dim)[rank*lkv:(rank+1)*lkv].reshape(-1, args.dim)

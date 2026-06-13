@@ -132,3 +132,31 @@ torchrun --nproc-per-node 8 generate_mimo.py \
 - ✅ 已修 4 个 bug：qkv reshape、fp8-dtype 污染、HF rotate_half RoPE、RMSNorm (1+w)
 - ⚠️ 仍乱码：还差 1-N 个数值约定 bug，需逐层对照（MiMo 无公开 modeling，最难点）
 - 属"工程可完成、非架构障碍"，预计还需数小时逐层 debug（理想情况有 HF 参考实现可对照会快很多）
+
+---
+
+## 🎉 跑通正确性（2026-06-13，B200）
+
+```
+Prompt:     What is the capital of France? Answer in one sentence.
+Completion: <think>The user is asking a straightforward factual question about
+            the capital of France. This...
+```
+连贯英文（MiMo 是 thinking 模型，<think> 开头正确）。
+
+### 决定性的两个修复
+1. **qkv 交错布局**（用户线索 + whn09 Neuron 参考交叉验证）：fused qkv 不是
+   `[all_Q|all_K|all_V]`，而是 8 个 KV-group 交错 `[16Q,1K,1V]×8`，且 FP8 scale
+   有 phantom-row padding（每组 27 block → 3456 padded，dequant 后裁回 3392）。
+2. **撤销错误的 (1+w) RMSNorm**：MiMo 用标准 RMSNorm。原始 norm 权重 mean 有大有小
+   （model.norm 3.8、layer norms 0.2~0.5），分布正常；之前 layer0 全零是 fp8-dtype
+   污染 bug（已单独修），被我误判为 norm 约定问题。
+
+### 注意：芯片无关性
+参考了 whn09 的 Neuron(Trainium) MiMo 实现，但**只采纳芯片无关的部分**：qkv 物理布局、
+RoPE/scaling/sink 数学、RMSNorm 约定。Neuron 特定的部分（CONVERT_TO_MHA、NKI
+accumulator、tp 分片策略）未照搬——本实现是 B200 + 纯 PyTorch + 8卡 GQA 分片。
+
+### 全部已修 bug 汇总
+qkv reshape → fp8-dtype 污染(全零) → HF rotate_half RoPE → 误加(1+w)后撤销 →
+**qkv 交错布局 + phantom-scale padding（决定性）**。
