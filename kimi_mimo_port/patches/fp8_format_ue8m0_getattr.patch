@@ -1,0 +1,9 @@
+# Necessary patch for PR #27638 (csAugust:mimo-v2-fp4-dflash) to run on
+# lmsysorg/sglang:dev-cu13. The PR's fp8.py:1430 directly accesses
+# .format_ue8m0 on the DeepGEMM ue8m0-requant branch, but that Parameter
+# attribute isn't always set. Lines 784/870/1109 in the SAME file already use
+# the safe getattr form — this is the PR's own oversight. Minimal fix:
+#
+# fp8.py, in process_weights_after_loading_block_quant (~line 1430):
+# -                and not layer.w13_weight_scale_inv.format_ue8m0
+# +                and not getattr(layer.w13_weight_scale_inv, "format_ue8m0", False)

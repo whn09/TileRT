@@ -255,3 +255,32 @@ MiMo 的 fused qkv 是 **TP=8 交错打包**（即用户最初指出的交错布
 （权重/backend/cuda graph）都已解决，剩下的是**硬件规模**：需要 2×8 B200 节点跑
 tp16/dp2 才能既满足 qkv 的 attn-TP=8 又满足 MiMo 要求的 dp=2。本次单节点 8 卡是硬件
 不足，非软件不可行。
+
+---
+
+## ✅✅✅ MiMo SGLang 三阶段全部跑通（2026-06-13，单节点 8×B200）
+
+用户校正方向后，循序渐进、stock sglang dev-cu13 镜像、最小必要 patch：
+
+| 阶段 | 模型 | spec decode | 结果 | 长文本 tok/s |
+|---|---|---|---|---|
+| **1** | MiMo-V2.5-Pro (FP8) | 无 | ✅ 正确 | **65** |
+| **2** | MiMo-V2.5-Pro (FP8) | EAGLE multi-layer | ✅ 正确 | **134** (2.1×) |
+| **3** | MiMo-V2.5-Pro-FP4-DFlash | DFLASH | ✅ 正确 | **97.6** (FP4+DFlash) |
+
+正确输出均为 "The capital of France is Paris."
+
+### 关键配置（之前一直卡住的根因）
+1. **dp=1 不是 dp=2**（单节点 8 卡）：MiMo fused qkv 是 TP=8 交错 → effective
+   attn-TP 必须=8 = tp_size/dp_size/attn_cp_size。8 卡上只有 dp=1 满足；dp=2 需 16 卡
+   （小米官方 2 节点命令正是 tp16/dp2）。**我之前一直试 dp=2 / dp-attention 砍半 → 全崩。**
+2. **fa4 不是 fa3**：fa3 backend 在 B200(SM100) 被 SM 断言挡（只支持 SM8/9）；
+   fa4 无此断言且支持 attention sink（MiMo SWA 层需要）。官方配置假设 H100/H200 才用 fa3。
+3. Phase 1/2（FP8 Pro）**stock 镜像零 patch** 即可。
+4. Phase 3（FP4-DFlash）需 **PR #27638**（PYTHONPATH 覆盖）+ **1 个必要 patch**：
+   fp8.py:1430 `.format_ue8m0` 改 `getattr(...,False)`（PR 自身疏漏，同文件他处已用 getattr）。
+
+### DFlash 实测
+accept len 2.1-2.6、gen throughput ~97-103 tok/s。接受长度低于小米宣传的 6+
+（可能与 greedy/短上下文/draft-tokens 调参有关，可进一步优化），但 FP4+DFlash 全链路
+已正确跑通。可工作脚本：`launch_mimo_fp4_dflash_WORKING.sh`。
